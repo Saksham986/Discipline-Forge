@@ -23,8 +23,12 @@ function generateId() {
 
 function loadData() {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return JSON.parse(raw);
-    const data = { goals: getDefaultGoals(), dailyLog: {}, streaks: {} };
+    if (raw) {
+        const data = JSON.parse(raw);
+        if (!data.achievements) data.achievements = {};
+        return data;
+    }
+    const data = { goals: getDefaultGoals(), dailyLog: {}, streaks: {}, achievements: {} };
     saveData(data);
     return data;
 }
@@ -273,6 +277,9 @@ function renderDashboard() {
     // === Behind Tracker ===
     renderBehindTracker(pct);
 
+    // === Achievements ===
+    renderDashboardAchievements();
+
     // Render goal cards
     renderGoalCards('all');
 }
@@ -404,6 +411,7 @@ function renderGoalCards(filter) {
                 ${g.target ? `<span class="goal-meta-item">${entry.progress}/${g.target} ${g.unit || ''}</span>` : ''}
                 ${streak > 0 ? `<span class="goal-streak"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>${streak}d</span>` : ''}
             </div>
+            <div class="goal-sparkline">${generateSparkline(g.id)}</div>
             ${deficit.deficit > 0 ? `
             <div class="goal-card-deficit">
                 <span class="deficit-indicator">📉 ${deficit.deficit} ${deficit.unit} behind</span>
@@ -520,6 +528,7 @@ function incrementGoal(id) {
             showToast(`+1 ${goal.unit || 'progress'} added`, 'info');
         }
         saveData(appData);
+        checkAchievements();
         refreshCurrentView();
     }
 }
@@ -542,6 +551,7 @@ function toggleComplete(id) {
         launchConfetti();
     }
     saveData(appData);
+    checkAchievements();
     refreshCurrentView();
 }
 
@@ -611,6 +621,7 @@ function catchUpGoal(id) {
     const covered = Math.min(catchUpAmount, deficit.deficit) - remaining;
     showToast(`Covered ${covered} ${goal.unit} of backlog! 💪`, 'success');
     if (covered > 0) launchConfetti();
+    checkAchievements();
     refreshCurrentView();
 }
 
@@ -716,6 +727,7 @@ function saveGoal(e) {
     saveData(appData);
     ensureTodayLog();
     closeGoalModal();
+    checkAchievements();
     refreshCurrentView();
 }
 
@@ -831,7 +843,7 @@ function renderCalendar() {
             tooltip = `${completed}/${goalCount} goals (${pct}%)`;
         }
 
-        html += `<div class="cal-day level-${level} ${isToday ? 'today' : ''} ${log ? 'has-data' : ''}" ${tooltip ? `data-tooltip="${tooltip}"` : ''}>${day}</div>`;
+        html += `<div class="cal-day level-${level} ${isToday ? 'today' : ''} ${log ? 'has-data' : ''}" ${tooltip ? `data-tooltip="${tooltip}"` : ''} ${log ? `onclick="showCalendarDayDetail('${dateStr}')"` : ''}>${day}</div>`;
     }
 
     grid.innerHTML = html;
@@ -875,9 +887,12 @@ function renderStreakTimeline() {
 
 // ===== Stats =====
 function renderStats() {
+    renderTrendChart();
     renderWeeklyChart();
     renderGoalPerformance();
     renderBestStreaks();
+    renderCategoryDonut();
+    renderAchievementsGrid();
 }
 
 function renderWeeklyChart() {
@@ -1108,6 +1123,329 @@ document.addEventListener('keydown', (e) => {
         }
     }
 });
+
+// ===== Goal Sparklines =====
+function generateSparkline(goalId) {
+    const goal = appData.goals.find(g => g.id === goalId);
+    const color = goal ? goal.color : '#6C5CE7';
+    const points = [];
+    const dots = [];
+
+    for (let i = 6; i >= 0; i--) {
+        const d = new Date();
+        d.setDate(d.getDate() - i);
+        const dateStr = d.toISOString().split('T')[0];
+        const entry = appData.dailyLog[dateStr]?.[goalId];
+
+        let value = 0;
+        if (entry) {
+            if (goal && goal.target > 0) {
+                value = Math.min(100, (entry.progress / goal.target) * 100);
+            } else if (entry.status === 'completed') {
+                value = 100;
+            }
+        }
+
+        const x = (6 - i) * 12 + 4;
+        const y = 18 - (value / 100 * 14);
+        points.push(`${x},${y}`);
+        dots.push({ x, y, completed: entry?.status === 'completed' });
+    }
+
+    return `<svg viewBox="0 0 80 22" fill="none" class="sparkline-svg">
+        <polyline points="${points.join(' ')}" stroke="${color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none" opacity="0.5"/>
+        ${dots.map(d => `<circle cx="${d.x}" cy="${d.y}" r="2" fill="${d.completed ? color : 'rgba(255,255,255,0.12)'}"/>`).join('')}
+    </svg>`;
+}
+
+// ===== 30-Day Trend Chart =====
+function renderTrendChart() {
+    const container = document.getElementById('trend-chart');
+    if (!container) return;
+
+    const goalCount = appData.goals.length;
+    const data = [];
+
+    for (let i = 29; i >= 0; i--) {
+        const d = new Date();
+        d.setDate(d.getDate() - i);
+        const dateStr = d.toISOString().split('T')[0];
+        const log = appData.dailyLog[dateStr];
+        let pct = 0;
+
+        if (log && goalCount > 0) {
+            const completed = Object.values(log).filter(e => e.status === 'completed').length;
+            pct = Math.round((completed / goalCount) * 100);
+        }
+
+        data.push({ dateStr, pct, dayLabel: d.getDate() });
+    }
+
+    const w = 540, h = 160, px = 30, py = 10;
+    const chartW = w - px * 2, chartH = h - py * 2;
+
+    const points = data.map((d, i) => ({
+        x: px + (i / 29) * chartW,
+        y: py + chartH - (d.pct / 100) * chartH,
+        ...d
+    }));
+
+    const polyPoints = points.map(p => `${p.x},${p.y}`).join(' ');
+    const areaPoints = `${points[0].x},${py + chartH} ${polyPoints} ${points[points.length - 1].x},${py + chartH}`;
+
+    const gridLines = [0, 50, 100].map(pct => {
+        const y = py + chartH - (pct / 100) * chartH;
+        return `<line x1="${px}" y1="${y}" x2="${px + chartW}" y2="${y}" stroke="rgba(255,255,255,0.05)" stroke-width="1"/>
+                <text x="${px - 6}" y="${y + 3}" text-anchor="end" fill="var(--text-muted)" font-size="9" font-family="Inter">${pct}%</text>`;
+    }).join('');
+
+    const xLabels = points.filter((_, i) => i % 7 === 0 || i === 29).map(p =>
+        `<text x="${p.x}" y="${py + chartH + 16}" text-anchor="middle" fill="var(--text-muted)" font-size="9" font-family="Inter">${p.dayLabel}</text>`
+    ).join('');
+
+    const dotsHtml = points.map(p =>
+        `<circle cx="${p.x}" cy="${p.y}" r="3" fill="${p.pct > 0 ? '#6C5CE7' : 'rgba(255,255,255,0.08)'}" class="trend-dot"><title>${p.dateStr}: ${p.pct}%</title></circle>`
+    ).join('');
+
+    container.innerHTML = `
+        <svg viewBox="0 0 ${w} ${h + 20}" preserveAspectRatio="xMidYMid meet">
+            <defs>
+                <linearGradient id="trendGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stop-color="rgba(108,92,231,0.25)"/>
+                    <stop offset="100%" stop-color="rgba(108,92,231,0)"/>
+                </linearGradient>
+            </defs>
+            ${gridLines}
+            <polygon points="${areaPoints}" fill="url(#trendGrad)"/>
+            <polyline points="${polyPoints}" fill="none" stroke="#6C5CE7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            ${dotsHtml}
+            ${xLabels}
+        </svg>`;
+}
+
+// ===== Category Donut Chart =====
+function renderCategoryDonut() {
+    const container = document.getElementById('category-donut');
+    if (!container) return;
+
+    const categoryMeta = {
+        health: { label: 'Health & Fitness', emoji: '🏃', color: '#00B894' },
+        learning: { label: 'Learning', emoji: '📚', color: '#0984E3' },
+        mindset: { label: 'Mindset', emoji: '🧠', color: '#6C5CE7' },
+        productivity: { label: 'Productivity', emoji: '⚡', color: '#E17055' },
+        creativity: { label: 'Creativity', emoji: '🎨', color: '#E84393' },
+        custom: { label: 'Custom', emoji: '✨', color: '#A29BFE' }
+    };
+
+    const categories = {};
+
+    appData.goals.forEach(g => {
+        const cat = g.category || 'custom';
+        if (!categories[cat]) categories[cat] = { count: 0, completed7d: 0, total7d: 0 };
+        categories[cat].count++;
+
+        for (let i = 0; i < 7; i++) {
+            const d = new Date();
+            d.setDate(d.getDate() - i);
+            const dateStr = d.toISOString().split('T')[0];
+            const entry = appData.dailyLog[dateStr]?.[g.id];
+            categories[cat].total7d++;
+            if (entry?.status === 'completed') categories[cat].completed7d++;
+        }
+    });
+
+    const totalGoals = appData.goals.length;
+    if (totalGoals === 0) {
+        container.innerHTML = '<p style="color:var(--text-muted);font-size:13px">Add goals to see breakdown</p>';
+        return;
+    }
+
+    const r = 55, sw = 16;
+    const circumference = 2 * Math.PI * r;
+    let cumulativeOffset = 0;
+
+    const segments = Object.entries(categories).map(([key, data]) => {
+        const meta = categoryMeta[key] || categoryMeta.custom;
+        const arcLen = (data.count / totalGoals) * circumference;
+        const offset = cumulativeOffset;
+        cumulativeOffset += arcLen;
+        const completionPct = data.total7d > 0 ? Math.round((data.completed7d / data.total7d) * 100) : 0;
+        return { key, ...data, ...meta, arcLen, offset, completionPct };
+    });
+
+    const circles = segments.map(s =>
+        `<circle cx="65" cy="65" r="${r}" fill="none" stroke="${s.color}" stroke-width="${sw}" stroke-dasharray="${s.arcLen} ${circumference - s.arcLen}" stroke-dashoffset="${-s.offset}" class="donut-segment"/>`
+    ).join('');
+
+    const legend = segments.map(s => {
+        const pctColor = s.completionPct > 70 ? 'var(--accent-green)' : s.completionPct > 40 ? 'var(--accent-orange)' : 'var(--accent-red)';
+        return `<div class="donut-legend-item">
+            <span class="donut-legend-color" style="background:${s.color}"></span>
+            <span class="donut-legend-label">${s.emoji} ${s.label}</span>
+            <span class="donut-legend-pct" style="color:${pctColor}">${s.completionPct}%</span>
+        </div>`;
+    }).join('');
+
+    container.innerHTML = `
+        <div class="donut-chart-layout">
+            <div class="donut-svg-wrap">
+                <svg viewBox="0 0 130 130">${circles}</svg>
+                <div class="donut-center-text">
+                    <span class="donut-count">${totalGoals}</span>
+                    <span class="donut-label">Goals</span>
+                </div>
+            </div>
+            <div class="donut-legend">${legend}</div>
+        </div>`;
+}
+
+// ===== Calendar Day Detail =====
+function showCalendarDayDetail(dateStr) {
+    const container = document.getElementById('calendar-day-detail');
+    if (!container) return;
+
+    const log = appData.dailyLog[dateStr];
+    const d = new Date(dateStr + 'T00:00:00');
+    const dayLabel = d.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+
+    if (!log) {
+        container.innerHTML = `
+            <div class="day-detail-header">
+                <h4>${dayLabel}</h4>
+                <button onclick="closeCalendarDayDetail()" class="day-detail-close">&times;</button>
+            </div>
+            <p class="day-detail-empty">No activity recorded</p>`;
+        container.classList.add('active');
+        return;
+    }
+
+    const goalCount = appData.goals.length;
+    const completed = Object.values(log).filter(e => e.status === 'completed').length;
+    const pct = goalCount > 0 ? Math.round((completed / goalCount) * 100) : 0;
+
+    const goalDetails = appData.goals.map(g => {
+        const entry = log[g.id];
+        if (!entry) return '';
+        const isComplete = entry.status === 'completed';
+        const progress = g.target ? `${entry.progress}/${g.target}` : (isComplete ? 'Done' : 'Missed');
+        return `<div class="day-detail-goal">
+            <span class="day-detail-dot" style="background:${isComplete ? g.color : 'var(--border-color)'}"></span>
+            <span class="day-detail-goal-name">${escapeHtml(g.name)}</span>
+            <span class="day-detail-goal-status ${isComplete ? 'done' : ''}">${progress}</span>
+        </div>`;
+    }).filter(Boolean).join('');
+
+    container.innerHTML = `
+        <div class="day-detail-header">
+            <h4>${dayLabel}</h4>
+            <span class="day-detail-pct" style="color:${pct >= 75 ? 'var(--accent-green)' : pct >= 50 ? 'var(--accent-orange)' : 'var(--accent-red)'}">${pct}%</span>
+            <button onclick="closeCalendarDayDetail()" class="day-detail-close">&times;</button>
+        </div>
+        <div class="day-detail-summary">${completed}/${goalCount} goals completed</div>
+        <div class="day-detail-goals">${goalDetails}</div>`;
+    container.classList.add('active');
+}
+
+function closeCalendarDayDetail() {
+    document.getElementById('calendar-day-detail')?.classList.remove('active');
+}
+
+// ===== Achievement System =====
+const ACHIEVEMENTS = [
+    { id: 'first_complete', name: 'First Step', desc: 'Complete your first goal', icon: '🎯' },
+    { id: 'perfect_day', name: 'Perfect Day', desc: 'Complete all goals in one day', icon: '⭐' },
+    { id: 'streak_3', name: 'Hat Trick', desc: '3-day streak', icon: '🔥' },
+    { id: 'streak_7', name: '7-Day Warrior', desc: '7-day streak', icon: '⚔️' },
+    { id: 'streak_14', name: 'Unstoppable', desc: '14-day streak', icon: '💪' },
+    { id: 'streak_30', name: '30-Day Legend', desc: '30-day streak', icon: '🏆' },
+    { id: 'five_goals', name: 'Goal Setter', desc: 'Track 5+ goals', icon: '📝' },
+    { id: 'comeback', name: 'Comeback King', desc: 'Clear all deficit', icon: '💥' },
+    { id: 'ten_days', name: 'Dedicated', desc: 'Active for 10 days', icon: '📅' },
+    { id: 'all_categories', name: 'Well Rounded', desc: 'Goals in 3+ categories', icon: '🌈' },
+];
+
+function checkAchievements() {
+    if (!appData.achievements) appData.achievements = {};
+    const newUnlocks = [];
+
+    const checks = {
+        first_complete: () => Object.values(appData.dailyLog).some(dayLog =>
+            Object.values(dayLog).some(e => e.status === 'completed')
+        ),
+        perfect_day: () => {
+            const d = today();
+            const log = appData.dailyLog[d];
+            if (!log) return false;
+            return appData.goals.length > 0 && appData.goals.every(g => log[g.id]?.status === 'completed');
+        },
+        streak_3: () => calculateOverallStreak() >= 3,
+        streak_7: () => calculateOverallStreak() >= 7,
+        streak_14: () => calculateOverallStreak() >= 14,
+        streak_30: () => calculateOverallStreak() >= 30,
+        five_goals: () => appData.goals.length >= 5,
+        comeback: () => {
+            const hasHistory = Object.keys(appData.dailyLog).length > 1;
+            return hasHistory && calculateTotalDeficit().totalDeficit === 0;
+        },
+        ten_days: () => {
+            const activeDays = new Set();
+            Object.entries(appData.dailyLog).forEach(([date, log]) => {
+                if (Object.values(log).some(e => e.status === 'completed')) activeDays.add(date);
+            });
+            return activeDays.size >= 10;
+        },
+        all_categories: () => new Set(appData.goals.map(g => g.category)).size >= 3,
+    };
+
+    ACHIEVEMENTS.forEach(badge => {
+        if (appData.achievements[badge.id]) return;
+        if (checks[badge.id] && checks[badge.id]()) {
+            appData.achievements[badge.id] = today();
+            newUnlocks.push(badge);
+        }
+    });
+
+    if (newUnlocks.length > 0) {
+        saveData(appData);
+        newUnlocks.forEach(badge => {
+            showToast(`Badge Unlocked: ${badge.name} ${badge.icon}`, 'success');
+        });
+        launchConfetti();
+    }
+}
+
+function renderDashboardAchievements() {
+    const container = document.getElementById('dashboard-achievements');
+    if (!container) return;
+    if (!appData.achievements) appData.achievements = {};
+
+    const unlocked = ACHIEVEMENTS.filter(b => appData.achievements[b.id]);
+    const locked = ACHIEVEMENTS.filter(b => !appData.achievements[b.id]);
+
+    container.innerHTML = [...unlocked, ...locked].map(b => {
+        const isUnlocked = !!appData.achievements[b.id];
+        return `<div class="achievement-badge-mini ${isUnlocked ? 'unlocked' : 'locked'}" data-tooltip="${isUnlocked ? b.name : b.desc}">
+            ${isUnlocked ? b.icon : '🔒'}
+        </div>`;
+    }).join('');
+}
+
+function renderAchievementsGrid() {
+    const container = document.getElementById('achievements-grid');
+    if (!container) return;
+    if (!appData.achievements) appData.achievements = {};
+
+    container.innerHTML = ACHIEVEMENTS.map(b => {
+        const isUnlocked = !!appData.achievements[b.id];
+        const date = appData.achievements[b.id];
+        return `<div class="achievement-card ${isUnlocked ? 'unlocked' : 'locked'}">
+            <span class="badge-icon">${isUnlocked ? b.icon : '🔒'}</span>
+            <div class="badge-name">${b.name}</div>
+            <div class="badge-desc">${b.desc}</div>
+            ${isUnlocked ? `<div class="badge-date">${date}</div>` : ''}
+        </div>`;
+    }).join('');
+}
 
 // ===== FAB for mobile =====
 function initFAB() {
