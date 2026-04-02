@@ -340,6 +340,7 @@ function renderBehindTracker(todayPct) {
                             <div class="severity-fill" style="width:${severityPct}%"></div>
                         </div>
                     </div>
+                    <button class="behind-catch-up-btn" onclick="catchUpGoal('${d.goal.id}')" title="Catch up on this goal">⚡</button>
                 </div>`;
             }).join('')}
         </div>`;
@@ -407,6 +408,7 @@ function renderGoalCards(filter) {
             <div class="goal-card-deficit">
                 <span class="deficit-indicator">📉 ${deficit.deficit} ${deficit.unit} behind</span>
                 <span class="deficit-days">(${deficit.missedDays} day${deficit.missedDays > 1 ? 's' : ''} missed)</span>
+                <button class="catch-up-btn" onclick="catchUpGoal('${g.id}')" title="Cover previous backlog">⚡ Catch Up</button>
             </div>` : ''}
             <div class="goal-progress-bar">
                 <div class="goal-progress-fill" style="width:${pct}%;background:${g.color}"></div>
@@ -472,7 +474,7 @@ function renderGoalsList() {
                     <span>${g.frequency}</span>
                     ${g.target ? `<span>${entry.progress}/${g.target} ${g.unit || ''}</span>` : ''}
                     ${streak > 0 ? `<span style="color:#E17055">🔥 ${streak}d</span>` : ''}
-                    ${deficit.deficit > 0 ? `<span class="list-deficit-tag">−${deficit.deficit} behind</span>` : ''}
+                    ${deficit.deficit > 0 ? `<span class="list-deficit-tag">−${deficit.deficit} behind</span><button class="catch-up-btn-sm" onclick="event.stopPropagation();catchUpGoal('${g.id}')">⚡ Catch Up</button>` : ''}
                 </div>
             </div>
             <div class="goal-list-progress">
@@ -549,6 +551,66 @@ function resetGoal(id) {
     appData.dailyLog[d][id] = { progress: 0, status: 'pending' };
     saveData(appData);
     showToast('Goal reset for today', 'info');
+    refreshCurrentView();
+}
+
+// ===== Catch Up on Previous Deficit =====
+function catchUpGoal(id) {
+    const goal = appData.goals.find(g => g.id === id);
+    if (!goal) return;
+
+    const deficit = calculateGoalDeficit(id);
+    if (deficit.deficit <= 0) {
+        showToast('No deficit to catch up on!', 'info');
+        return;
+    }
+
+    const amount = prompt(
+        `You are ${deficit.deficit} ${deficit.unit} behind on "${goal.name}" (${deficit.missedDays} day${deficit.missedDays > 1 ? 's' : ''} missed).\n\nHow many ${deficit.unit} have you completed to cover the backlog?`,
+        deficit.deficit
+    );
+
+    if (amount === null) return;
+    const catchUpAmount = parseInt(amount);
+    if (isNaN(catchUpAmount) || catchUpAmount <= 0) {
+        showToast('Please enter a valid number', 'warning');
+        return;
+    }
+
+    // Fill in past days' logs to cover the deficit
+    let remaining = Math.min(catchUpAmount, deficit.deficit);
+    const createdDate = new Date(goal.createdAt);
+    const todayDate = new Date(today());
+    const d = new Date(createdDate);
+
+    while (d < todayDate && remaining > 0) {
+        const dateStr = d.toISOString().split('T')[0];
+        if (!appData.dailyLog[dateStr]) {
+            appData.dailyLog[dateStr] = {};
+        }
+        if (!appData.dailyLog[dateStr][id]) {
+            appData.dailyLog[dateStr][id] = { progress: 0, status: 'pending' };
+        }
+
+        const entry = appData.dailyLog[dateStr][id];
+        if (entry.status !== 'completed') {
+            const missed = goal.target - entry.progress;
+            if (missed > 0) {
+                const fill = Math.min(missed, remaining);
+                entry.progress += fill;
+                remaining -= fill;
+                if (entry.progress >= goal.target) {
+                    entry.status = 'completed';
+                }
+            }
+        }
+        d.setDate(d.getDate() + 1);
+    }
+
+    saveData(appData);
+    const covered = Math.min(catchUpAmount, deficit.deficit) - remaining;
+    showToast(`Covered ${covered} ${goal.unit} of backlog! 💪`, 'success');
+    if (covered > 0) launchConfetti();
     refreshCurrentView();
 }
 
