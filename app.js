@@ -2,6 +2,8 @@
 
 // ===== Data Layer =====
 const STORAGE_KEY = 'discipline_forge_data';
+const GEMINI_API_KEY = 'AIzaSyAfc20U0BYezUFC7J1GOlrR4aN1Ym0UYEA';
+const USER_NAME = 'Saksham';
 const today = () => new Date().toISOString().split('T')[0];
 
 function getDefaultGoals() {
@@ -204,7 +206,7 @@ function updateGreeting() {
     let greeting = 'Good Evening';
     if (hour < 12) greeting = 'Good Morning';
     else if (hour < 17) greeting = 'Good Afternoon';
-    document.getElementById('greeting-text').textContent = greeting;
+    document.getElementById('greeting-text').textContent = `${greeting}, ${USER_NAME}`;
 
     const options = { weekday: 'long', month: 'short', day: 'numeric' };
     document.getElementById('date-text').textContent = new Date().toLocaleDateString('en-US', options);
@@ -437,6 +439,7 @@ function renderGoalCards(filter) {
                     <button class="goal-action-btn" onclick="editGoal('${g.id}')" title="Edit">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
                     </button>
+                    <button class="goal-action-btn btn-ai" onclick="manualAiRename('${g.id}')" title="Rename with AI">✨</button>
                     <button class="goal-action-btn btn-delete" onclick="deleteGoal('${g.id}')" title="Delete">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                     </button>
@@ -708,15 +711,18 @@ function saveGoal(e) {
 
     if (!name) return;
 
+    let goalId;
     if (id) {
         const goal = appData.goals.find(g => g.id === id);
         if (goal) {
             Object.assign(goal, { name, category, frequency, target, unit, color, startDate, endDate });
             showToast('Goal updated', 'success');
+            goalId = id;
         }
     } else {
+        goalId = generateId();
         appData.goals.push({
-            id: generateId(),
+            id: goalId,
             name, category, frequency, target, unit, color,
             startDate, endDate,
             createdAt: today()
@@ -729,6 +735,11 @@ function saveGoal(e) {
     closeGoalModal();
     checkAchievements();
     refreshCurrentView();
+
+    // AI-enhance the goal name in the background
+    if (goalId) {
+        aiRefineGoalName(goalId, name, category, target, unit);
+    }
 }
 
 function toggleCustomDates() {
@@ -1455,6 +1466,141 @@ function initFAB() {
     }
 }
 
+// ===== Gemini AI — Goal Name Refinement =====
+let aiRefineInProgress = false;
+
+async function callGeminiWithRetry(prompt, retries = 3) {
+    for (let attempt = 0; attempt < retries; attempt++) {
+        try {
+            const response = await fetch(
+                `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        contents: [{ parts: [{ text: prompt }] }],
+                        generationConfig: {
+                            temperature: 0.7,
+                            maxOutputTokens: 30,
+                            topP: 0.9
+                        }
+                    })
+                }
+            );
+
+            if (response.ok) {
+                const data = await response.json();
+                return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || null;
+            }
+
+            if (response.status === 429) {
+                // Rate limited — wait with exponential backoff
+                const waitTime = Math.pow(2, attempt + 1) * 1000; // 2s, 4s, 8s
+                console.log(`Rate limited, retrying in ${waitTime / 1000}s... (attempt ${attempt + 1}/${retries})`);
+                await new Promise(resolve => setTimeout(resolve, waitTime));
+                continue;
+            }
+
+            console.warn('Gemini API error:', response.status);
+            return null;
+        } catch (err) {
+            console.warn(`Gemini fetch error (attempt ${attempt + 1}):`, err);
+            if (attempt < retries - 1) {
+                await new Promise(resolve => setTimeout(resolve, 1500));
+            }
+        }
+    }
+    return null;
+}
+
+async function aiRefineGoalName(goalId, originalName, category, target, unit) {
+    const prompt = `You are a personal development coach. Rename this daily goal to sound more sophisticated, aspirational, and powerful — but keep it concise (max 8 words). Do NOT use quotes in your response. Just return the refined name, nothing else.
+
+Original goal: "${originalName}"
+Category: ${category}
+${target ? `Daily target: ${target} ${unit || 'items'}` : ''}
+
+Examples of good renames:
+- "Learn new English words" → "Sophisticated Vocabulary Mastery"
+- "Read 1 page of a self-help book" → "Daily Wisdom Page Ritual"
+- "Avoid junk food" → "Clean Nutrition Discipline"
+- "Solve at least 5 maths questions" → "Mathematical Mind Sharpening"
+- "Watch 1 self-help video" → "Growth Mindset Video Session"
+- "Listen to a podcast" → "Curated Podcast Immersion"
+- "Research something new" → "Intellectual Curiosity Expedition"
+- "Speak at least 100 English sentences" → "English Fluency Practice"
+
+Refined name:`;
+
+    const refinedName = await callGeminiWithRetry(prompt);
+
+    if (refinedName && refinedName.length > 2 && refinedName.length < 60) {
+        const cleanName = refinedName.replace(/^["']|["']$/g, '').trim();
+
+        const goal = appData.goals.find(g => g.id === goalId);
+        if (goal && goal.name === originalName) {
+            goal.name = cleanName;
+            goal.originalName = originalName;
+            saveData(appData);
+            refreshCurrentView();
+            showToast(`✨ AI refined: "${cleanName}"`, 'success');
+            return true;
+        }
+    }
+    return false;
+}
+
+// Force re-rename all goals (ignores already-refined check)
+async function aiRefineAllGoalsForce() {
+    if (aiRefineInProgress) {
+        showToast('AI is already running...', 'info');
+        return;
+    }
+    appData.goals.forEach(g => delete g.originalName);
+    saveData(appData);
+    await aiRefineAllGoals();
+}
+
+// Manual re-rename (ignores the already-refined check)
+async function manualAiRename(goalId) {
+    const goal = appData.goals.find(g => g.id === goalId);
+    if (!goal) return;
+    delete goal.originalName; // clear so aiRefineGoalName allows a fresh rename
+    showToast('✨ AI is thinking...', 'info');
+    await aiRefineGoalName(goalId, goal.name, goal.category, goal.target, goal.unit);
+}
+
+// Batch-refine all goals that haven't been refined yet (runs once on load)
+async function aiRefineAllGoals() {
+    if (aiRefineInProgress) return;
+    aiRefineInProgress = true;
+
+    const unrefined = appData.goals.filter(g => !g.originalName);
+    if (unrefined.length === 0) {
+        aiRefineInProgress = false;
+        return;
+    }
+
+    console.log(`AI: Refining ${unrefined.length} goal(s) in the background...`);
+    showToast(`✨ AI is refining ${unrefined.length} goal name(s)...`, 'info');
+
+    for (let i = 0; i < unrefined.length; i++) {
+        const goal = unrefined[i];
+        // Re-check in case it was refined already (e.g. by a parallel call)
+        const current = appData.goals.find(g => g.id === goal.id);
+        if (current && !current.originalName) {
+            await aiRefineGoalName(goal.id, goal.name, goal.category, goal.target, goal.unit);
+        }
+        // Wait 4 seconds between each API call to respect rate limits
+        if (i < unrefined.length - 1) {
+            await new Promise(resolve => setTimeout(resolve, 1500));
+        }
+    }
+
+    aiRefineInProgress = false;
+    console.log('AI: Goal refinement complete.');
+}
+
 // ===== Init =====
 function init() {
     ensureTodayLog();
@@ -1465,6 +1611,9 @@ function init() {
     initFAB();
 
     setInterval(updateGreeting, 60000);
+
+    // AI-refine existing goals in the background (after a brief delay)
+    setTimeout(() => aiRefineAllGoals(), 1000);
 }
 
 init();

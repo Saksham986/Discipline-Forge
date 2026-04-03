@@ -1916,6 +1916,50 @@ body {
     animation: pulse 2s infinite;
 }
 
+/* ===== AI Rename Buttons ===== */
+.goal-action-btn.btn-ai {
+    font-size: 14px;
+    background: rgba(108,92,231,0.08);
+    color: var(--accent-purple);
+}
+
+.goal-action-btn.btn-ai:hover {
+    background: rgba(108,92,231,0.18);
+}
+
+.goals-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.btn-ai-rename-all {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    background: rgba(108,92,231,0.1);
+    color: var(--accent-purple);
+    border: 1px solid rgba(108,92,231,0.25);
+    border-radius: var(--radius-sm);
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all var(--transition);
+    white-space: nowrap;
+    min-height: 40px;
+}
+
+.btn-ai-rename-all:hover {
+    background: rgba(108,92,231,0.18);
+    border-color: rgba(108,92,231,0.4);
+}
+
+.btn-ai-rename-all:active {
+    transform: scale(0.97);
+}
+
 /* ===== Goal Sparklines ===== */
 .goal-sparkline {
     margin-bottom: 8px;
