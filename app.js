@@ -2,7 +2,7 @@
 
 // ===== Data Layer =====
 const STORAGE_KEY = 'discipline_forge_data';
-const GEMINI_API_KEY = 'AIzaSyAfc20U0BYezUFC7J1GOlrR4aN1Ym0UYEA';
+const GEMINI_API_KEY = 'AIzaSyCaSLEHn7YOCXdaqS-WgE4QqUXtyL1yfjw';
 const USER_NAME = 'Saksham';
 const today = () => new Date().toISOString().split('T')[0];
 
@@ -738,7 +738,7 @@ function saveGoal(e) {
 
     // AI-enhance the goal name in the background
     if (goalId) {
-        aiRefineGoalName(goalId, name, category, target, unit);
+        aiRefineGoalName(goalId);
     }
 }
 
@@ -1469,11 +1469,11 @@ function initFAB() {
 // ===== Gemini AI — Goal Name Refinement =====
 let aiRefineInProgress = false;
 
-async function callGeminiWithRetry(prompt, retries = 3) {
+async function callGeminiWithRetry(prompt, retries = 4) {
     for (let attempt = 0; attempt < retries; attempt++) {
         try {
             const response = await fetch(
-                `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+                `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`,
                 {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -1481,8 +1481,7 @@ async function callGeminiWithRetry(prompt, retries = 3) {
                         contents: [{ parts: [{ text: prompt }] }],
                         generationConfig: {
                             temperature: 0.7,
-                            maxOutputTokens: 30,
-                            topP: 0.9
+                            maxOutputTokens: 256
                         }
                     })
                 }
@@ -1494,31 +1493,37 @@ async function callGeminiWithRetry(prompt, retries = 3) {
             }
 
             if (response.status === 429) {
-                // Rate limited — wait with exponential backoff
-                const waitTime = Math.pow(2, attempt + 1) * 1000; // 2s, 4s, 8s
+                // Rate limited — wait with longer exponential backoff
+                const waitTime = Math.pow(2, attempt + 2) * 1000; // 4s, 8s, 16s, 32s
                 console.log(`Rate limited, retrying in ${waitTime / 1000}s... (attempt ${attempt + 1}/${retries})`);
                 await new Promise(resolve => setTimeout(resolve, waitTime));
                 continue;
             }
 
-            console.warn('Gemini API error:', response.status);
+            // Log the actual error for debugging
+            const errText = await response.text().catch(() => '');
+            console.warn('Gemini API error:', response.status, errText);
             return null;
         } catch (err) {
             console.warn(`Gemini fetch error (attempt ${attempt + 1}):`, err);
             if (attempt < retries - 1) {
-                await new Promise(resolve => setTimeout(resolve, 1500));
+                await new Promise(resolve => setTimeout(resolve, 3000));
             }
         }
     }
     return null;
 }
 
-async function aiRefineGoalName(goalId, originalName, category, target, unit) {
+async function aiRefineGoalName(goalId) {
+    const goal = appData.goals.find(g => g.id === goalId);
+    if (!goal) return false;
+
+    const nameToRefine = goal.name;
     const prompt = `You are a personal development coach. Rename this daily goal to sound more sophisticated, aspirational, and powerful — but keep it concise (max 8 words). Do NOT use quotes in your response. Just return the refined name, nothing else.
 
-Original goal: "${originalName}"
-Category: ${category}
-${target ? `Daily target: ${target} ${unit || 'items'}` : ''}
+Original goal: "${nameToRefine}"
+Category: ${goal.category}
+${goal.target ? `Daily target: ${goal.target} ${goal.unit || 'items'}` : ''}
 
 Examples of good renames:
 - "Learn new English words" → "Sophisticated Vocabulary Mastery"
@@ -1535,18 +1540,19 @@ Refined name:`;
     const refinedName = await callGeminiWithRetry(prompt);
 
     if (refinedName && refinedName.length > 2 && refinedName.length < 60) {
-        const cleanName = refinedName.replace(/^["']|["']$/g, '').trim();
+        const cleanName = refinedName.replace(/^["']|["']$/g, '').replace(/\*+/g, '').replace(/\n.*/g, '').trim();
+        const wordCount = cleanName.split(/\s+/).length;
 
-        const goal = appData.goals.find(g => g.id === goalId);
-        if (goal && goal.name === originalName) {
+        if (cleanName && cleanName.length > 5 && wordCount >= 2) {
+            goal.originalName = nameToRefine;
             goal.name = cleanName;
-            goal.originalName = originalName;
             saveData(appData);
             refreshCurrentView();
-            showToast(`✨ AI refined: "${cleanName}"`, 'success');
+            showToast(`✨ "${cleanName}"`, 'success');
             return true;
         }
     }
+    console.warn(`AI rename failed for: "${nameToRefine}"`);
     return false;
 }
 
@@ -1565,9 +1571,9 @@ async function aiRefineAllGoalsForce() {
 async function manualAiRename(goalId) {
     const goal = appData.goals.find(g => g.id === goalId);
     if (!goal) return;
-    delete goal.originalName; // clear so aiRefineGoalName allows a fresh rename
+    delete goal.originalName;
     showToast('✨ AI is thinking...', 'info');
-    await aiRefineGoalName(goalId, goal.name, goal.category, goal.target, goal.unit);
+    await aiRefineGoalName(goalId);
 }
 
 // Batch-refine all goals that haven't been refined yet (runs once on load)
@@ -1586,18 +1592,18 @@ async function aiRefineAllGoals() {
 
     for (let i = 0; i < unrefined.length; i++) {
         const goal = unrefined[i];
-        // Re-check in case it was refined already (e.g. by a parallel call)
         const current = appData.goals.find(g => g.id === goal.id);
         if (current && !current.originalName) {
-            await aiRefineGoalName(goal.id, goal.name, goal.category, goal.target, goal.unit);
+            await aiRefineGoalName(goal.id);
         }
-        // Wait 4 seconds between each API call to respect rate limits
+        // Wait 5 seconds between each API call to respect Gemini free tier rate limits (15 RPM)
         if (i < unrefined.length - 1) {
-            await new Promise(resolve => setTimeout(resolve, 1500));
+            await new Promise(resolve => setTimeout(resolve, 5000));
         }
     }
 
     aiRefineInProgress = false;
+    showToast('✨ All goals renamed!', 'success');
     console.log('AI: Goal refinement complete.');
 }
 
